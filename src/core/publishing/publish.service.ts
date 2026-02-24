@@ -796,15 +796,68 @@ export class PublishService extends BaseService {
   }
 
   private async submitPost(page: Page): Promise<void> {
-    const submitSelector = 'div.submit div.d-button-content';
-    const submitButton = await page.$(submitSelector);
+    // Try multiple selectors for the submit/publish button
+    const submitSelectors = [
+      'button.d-button.bg-red',
+      'button.custom-button.bg-red',
+      'div.submit div.d-button-content',
+      'div.submit button',
+      '.d-button-content',
+      'button.publish-btn',
+      '[class*="publish"] button',
+      '[class*="submit"] button',
+      'div[data-testid="publish-button"]',
+      '.ant-btn-primary',
+    ];
+
+    let submitButton: any = null;
+    let usedSelector = '';
+
+    // First, try to find button by exact text match using evaluateHandle
+    const publishButtonByText = await page.evaluateHandle(() => {
+      const buttons = Array.from(document.querySelectorAll('button'));
+      for (const btn of buttons) {
+        const text = btn.textContent?.trim() || '';
+        if (text === '发布' || text.includes('发布')) {
+          return btn;
+        }
+      }
+      return null;
+    });
+
+    if (publishButtonByText) {
+      submitButton = publishButtonByText;
+      usedSelector = 'button.d-button.bg-red';
+    } else {
+      // Fallback to other selectors
+      for (const selector of submitSelectors) {
+        try {
+          const button = await page.$(selector);
+          if (button) {
+            // Check if button is visible
+            const isVisible = await page.evaluate((el: Element) => {
+              const style = window.getComputedStyle(el as HTMLElement);
+              return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+            }, button);
+
+            if (isVisible) {
+              submitButton = button;
+              usedSelector = selector;
+              break;
+            }
+          }
+        } catch (error) {
+          logger.debug(`Selector ${selector} failed: ${error}`);
+        }
+      }
+    }
 
     if (!submitButton) {
       throw new PublishError('Could not find submit button');
     }
 
     // Wait for submit button to be visible
-    await page.waitForSelector(submitSelector, { visible: true, timeout: 10000 });
+    await page.waitForSelector(usedSelector, { visible: true, timeout: 10000 });
 
     try {
       await submitButton.click();
