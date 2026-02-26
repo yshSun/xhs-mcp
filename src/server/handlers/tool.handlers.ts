@@ -6,6 +6,7 @@ import { AuthService } from '../../core/auth/auth.service';
 import { FeedService } from '../../core/feeds/feed.service';
 import { PublishService } from '../../core/publishing/publish.service';
 import { NoteService } from '../../core/notes/note.service';
+import { DownloadService, UserService, DownloadOptions } from '../../core/downloading/index';
 import { getConfig } from '../../shared/config';
 import { XHSError } from '../../shared/errors';
 import {
@@ -36,6 +37,12 @@ export interface ToolRequestArgs {
   cursor?: string;
   note_id?: string;
   last_published?: boolean;
+  // Download and user profile args
+  url?: string;
+  mode?: string;
+  output_dir?: string;
+  input?: string;
+  delay?: number;
 }
 
 export class ToolHandlers {
@@ -43,6 +50,8 @@ export class ToolHandlers {
   private feedService: FeedService;
   private publishService: PublishService;
   private noteService: NoteService;
+  private downloadService: DownloadService;
+  private userService: UserService;
 
   constructor() {
     const config = getConfig();
@@ -50,6 +59,8 @@ export class ToolHandlers {
     this.feedService = new FeedService(config);
     this.publishService = new PublishService(config);
     this.noteService = new NoteService(config);
+    this.downloadService = new DownloadService(config);
+    this.userService = new UserService(config);
   }
 
   async handleAuthLogin(
@@ -200,6 +211,95 @@ export class ToolHandlers {
     }
   }
 
+  async handleDownloadNote(
+    url?: string,
+    mode?: string,
+    outputDir?: string,
+    browserPath?: string
+  ): Promise<{ content: Array<{ type: string; text: string }> }> {
+    validateRequiredParams({ url }, ['url']);
+
+    const downloadMode = mode || 'detail';
+    const output = outputDir || './downloads';
+
+    if (downloadMode === 'detail') {
+      const result = await this.downloadService.getNoteDetail(url!, browserPath);
+      return createMcpToolResponse(result);
+    } else if (downloadMode === 'download') {
+      const result = await this.downloadService.downloadNote(url!, output, browserPath);
+      return createMcpToolResponse(result);
+    } else {
+      throw new Error('Mode must be "detail" or "download"');
+    }
+  }
+
+  async handleGetUserProfile(
+    input?: string,
+    limit?: number,
+    browserPath?: string
+  ): Promise<{ content: Array<{ type: string; text: string }> }> {
+    validateRequiredParams({ input }, ['input']);
+
+    const noteLimit = limit || 10;
+    const result = await this.userService.getUserProfile(input!, noteLimit, browserPath);
+
+    return createMcpToolResponse({
+      success: result.success,
+      profile: result.profile,
+      notes: result.notes,
+      totalNotes: result.notes.length,
+      message: result.message,
+    });
+  }
+
+  async handleDownloadUserNotes(
+    input?: string,
+    limit?: number,
+    outputDir?: string,
+    delay?: number,
+    browserPath?: string
+  ): Promise<{ content: Array<{ type: string; text: string }> }> {
+    validateRequiredParams({ input }, ['input']);
+
+    const noteLimit = limit || 10;
+    const output = outputDir || './downloads';
+    const downloadDelay = delay || 2000;
+
+    // First get user profile and notes
+    const userProfile = await this.userService.getUserProfile(input!, noteLimit, browserPath);
+
+    if (!userProfile.success || userProfile.notes.length === 0) {
+      return createMcpToolResponse({
+        success: false,
+        message: userProfile.message || 'No notes found for this user',
+        profile: userProfile.profile,
+      });
+    }
+
+    // Download notes with delay
+    const downloadOptions: DownloadOptions = {
+      outputDir: output,
+      delay: downloadDelay,
+      limit: noteLimit,
+      browserPath,
+    };
+
+    const downloadResult = await this.downloadService.batchDownloadNotes(
+      userProfile.notes,
+      downloadOptions
+    );
+
+    return createMcpToolResponse({
+      success: downloadResult.success,
+      profile: userProfile.profile,
+      totalNotes: downloadResult.totalNotes,
+      downloadedCount: downloadResult.downloadedCount,
+      failedCount: downloadResult.failedCount,
+      files: downloadResult.files,
+      errors: downloadResult.errors.length > 0 ? downloadResult.errors : undefined,
+    });
+  }
+
   async handleToolRequest(
     name: string,
     args: ToolRequestArgs = {}
@@ -257,6 +357,30 @@ export class ToolHandlers {
           return await this.handleDeleteNote(
             args?.note_id as string,
             args?.last_published as boolean,
+            args?.browser_path as string
+          );
+
+        case 'xhs_download_note':
+          return await this.handleDownloadNote(
+            args?.url as string,
+            args?.mode as string,
+            args?.output_dir as string,
+            args?.browser_path as string
+          );
+
+        case 'xhs_get_user_profile':
+          return await this.handleGetUserProfile(
+            args?.input as string,
+            args?.limit as number,
+            args?.browser_path as string
+          );
+
+        case 'xhs_download_user_notes':
+          return await this.handleDownloadUserNotes(
+            args?.input as string,
+            args?.limit as number,
+            args?.output_dir as string,
+            args?.delay as number,
             args?.browser_path as string
           );
 

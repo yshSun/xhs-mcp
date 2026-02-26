@@ -14,6 +14,7 @@ import { XHS_TOOL_SCHEMAS } from '../server/schemas/tool.schemas';
 import { FeedService } from '../core/feeds/feed.service';
 import { PublishService } from '../core/publishing/publish.service';
 import { NoteService } from '../core/notes/note.service';
+import { DownloadService, UserService, DownloadOptions } from '../core/downloading/index';
 
 /**
  * CLI utility functions
@@ -354,6 +355,166 @@ async function main(): Promise<void> {
             opts.browserPath
           );
           utils.printSuccess(result);
+        } catch (error) {
+          utils.printError(error);
+        }
+      }
+    );
+
+  // Download: get note detail or download note files
+  program
+    .command('download')
+    .description('Download XiaoHongShu note (get detail or download files)')
+    .requiredOption('-u, --url <url>', 'XiaoHongShu note URL')
+    .option('-o, --output <directory>', 'Output directory for downloaded files', './downloads')
+    .option('-m, --mode <mode>', 'Mode: "detail" to get note info only, "download" to download files', 'detail')
+    .option('-b, --browser-path <path>', 'Custom browser binary path')
+    .action(
+      async (opts: {
+        url: string;
+        output: string;
+        mode: string;
+        browserPath?: string;
+      }) => {
+        const downloadService = new DownloadService(config);
+        try {
+          if (opts.mode === 'detail') {
+            // Get note detail only
+            const result = await downloadService.getNoteDetail(opts.url, opts.browserPath);
+            utils.printSuccess(result);
+          } else if (opts.mode === 'download') {
+            // Download note files
+            const result = await downloadService.downloadNote(opts.url, opts.output, opts.browserPath);
+            utils.printSuccess(result);
+          } else {
+            utils.printError(new Error('Mode must be "detail" or "download"'));
+          }
+        } catch (error) {
+          utils.printError(error);
+        }
+      }
+    );
+
+  // User: get user profile and notes
+  program
+    .command('user')
+    .description('Get XiaoHongShu user profile and their notes')
+    .requiredOption('-i, --input <input>', 'User profile URL, short link, or xhs number (小红书号)')
+    .option('-l, --limit <number>', 'Maximum number of notes to retrieve/download', '10')
+    .option('-o, --output <directory>', 'Output directory for downloaded files (only for download mode)', './downloads')
+    .option('-m, --mode <mode>', 'Mode: "list" to get note list only, "download" to download notes', 'list')
+    .option('-d, --delay <milliseconds>', 'Delay between downloads in milliseconds (default: 2000)', '2000')
+    .option('-b, --browser-path <path>', 'Custom browser binary path')
+    .action(
+      async (opts: {
+        input: string;
+        limit: string;
+        output: string;
+        mode: string;
+        delay: string;
+        browserPath?: string;
+      }) => {
+        const userService = new UserService(config);
+        const downloadService = new DownloadService(config);
+        try {
+          const limit = parseInt(opts.limit, 10) || 10;
+          const delay = parseInt(opts.delay, 10) || 2000;
+
+          // Get user profile and notes
+          const result = await userService.getUserProfile(opts.input, limit, opts.browserPath);
+
+          if (!result.success) {
+            utils.printError(new Error(result.message || 'Failed to get user profile'));
+            return;
+          }
+
+          if (opts.mode === 'list') {
+            // Just output the note list
+            utils.printSuccess({
+              success: true,
+              profile: result.profile,
+              notes: result.notes,
+              totalNotes: result.notes.length,
+            });
+          } else if (opts.mode === 'download') {
+            // Download notes with delay
+            const downloadOptions: DownloadOptions = {
+              outputDir: opts.output,
+              delay: delay,
+              limit: limit,
+              browserPath: opts.browserPath,
+              onProgress: (current, total, noteTitle) => {
+                console.log(`[${current}/${total}] Downloading: ${noteTitle}`);
+              },
+            };
+
+            const downloadResult = await downloadService.batchDownloadNotes(
+              result.notes,
+              downloadOptions
+            );
+
+            utils.printSuccess({
+              success: downloadResult.success,
+              profile: result.profile,
+              totalNotes: downloadResult.totalNotes,
+              downloadedCount: downloadResult.downloadedCount,
+              failedCount: downloadResult.failedCount,
+              files: downloadResult.files,
+              errors: downloadResult.errors.length > 0 ? downloadResult.errors : undefined,
+            });
+          } else {
+            utils.printError(new Error('Mode must be "list" or "download"'));
+          }
+        } catch (error) {
+          utils.printError(error);
+        }
+      }
+    );
+
+  // User Links: get user profile note links only
+  program
+    .command('user-links')
+    .description('Get XiaoHongShu user profile note links only')
+    .requiredOption('-i, --input <input>', 'User profile URL, short link, or xhs number (小红书号)')
+    .option('-l, --limit <number>', 'Maximum number of note links to retrieve', '20')
+    .option('-n, --first-n <number>', 'Get first N notes only (takes precedence over -l if specified)')
+    .option('-b, --browser-path <path>', 'Custom browser binary path')
+    .action(
+      async (opts: {
+        input: string;
+        limit: string;
+        firstN?: string;
+        browserPath?: string;
+      }) => {
+        const userService = new UserService(config);
+        try {
+          // Determine the limit: if -n is specified, use that; otherwise use -l
+          let limit = 20; // default
+          if (opts.firstN) {
+            limit = parseInt(opts.firstN, 10);
+            if (isNaN(limit) || limit <= 0) {
+              utils.printError(new Error('First N value must be a positive integer'));
+              return;
+            }
+          } else {
+            limit = parseInt(opts.limit, 10) || 20;
+          }
+
+          // Get user profile and note links
+          const result = await userService.getUserNoteLinks(opts.input, limit, opts.browserPath);
+
+          if (!result.success) {
+            utils.printError(new Error(result.message || 'Failed to get user note links'));
+            return;
+          }
+
+          // Output the note links
+          utils.printSuccess({
+            success: true,
+            profile: result.profile,
+            noteLinks: result.noteLinks,
+            totalLinks: result.noteLinks.length,
+          });
         } catch (error) {
           utils.printError(error);
         }

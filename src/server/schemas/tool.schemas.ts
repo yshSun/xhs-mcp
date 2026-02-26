@@ -208,6 +208,85 @@ export const XHS_TOOL_SCHEMAS: ToolSchema[] = [
       },
     },
   },
+  {
+    name: 'xhs_download_note',
+    description: 'Download a XiaoHongShu note - get detail info or download images/videos.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        url: {
+          type: 'string',
+          description: 'XiaoHongShu note URL (required)',
+        },
+        mode: {
+          type: 'string',
+          enum: ['detail', 'download'],
+          description: 'Mode: "detail" to get note info only, "download" to download files (default: detail)',
+        },
+        output_dir: {
+          type: 'string',
+          description: 'Output directory for downloaded files (default: ./downloads)',
+        },
+        browser_path: {
+          type: 'string',
+          description: 'Optional custom browser binary path',
+        },
+      },
+      required: ['url'],
+    },
+  },
+  {
+    name: 'xhs_get_user_profile',
+    description: 'Get XiaoHongShu user profile and their notes. Supports profile URL, short link (xhslink.com), or XHS number (小红书号).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        input: {
+          type: 'string',
+          description: 'User profile URL, short link (xhslink.com/m/xxx), or XHS number (小红书号, e.g. 2658829639)',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of notes to retrieve (default: 10)',
+        },
+        browser_path: {
+          type: 'string',
+          description: 'Optional custom browser binary path',
+        },
+      },
+      required: ['input'],
+    },
+  },
+  {
+    name: 'xhs_download_user_notes',
+    description: 'Download notes from a XiaoHongShu user. Supports profile URL, short link, or XHS number. Includes delay between downloads to avoid rate limiting.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        input: {
+          type: 'string',
+          description: 'User profile URL, short link (xhslink.com/m/xxx), or XHS number (小红书号)',
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of notes to download (default: 10, 0 for all)',
+        },
+        output_dir: {
+          type: 'string',
+          description: 'Output directory for downloaded files (default: ./downloads)',
+        },
+        delay: {
+          type: 'number',
+          description: 'Delay between downloads in milliseconds (default: 2000)',
+        },
+        browser_path: {
+          type: 'string',
+          description: 'Optional custom browser binary path',
+        },
+      },
+      required: ['input'],
+    },
+  },
 ];
 
 export const XHS_RESOURCE_SCHEMAS = [

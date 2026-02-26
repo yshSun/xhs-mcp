@@ -209,6 +209,34 @@ export interface FeedDetailResult {
 }
 
 /**
+ * Note detail result for download operation
+ */
+export interface NoteDetailResult {
+  readonly success: boolean;
+  readonly noteId: string;
+  readonly title: string;
+  readonly desc: string;
+  readonly type: 'video' | 'image';
+  readonly author: {
+    readonly userId: string;
+    readonly nickname: string;
+  };
+  readonly imageUrls: readonly string[];
+  readonly videoUrl?: string;
+  readonly liveUrls?: readonly string[];
+  readonly interactInfo: {
+    readonly likedCount: string;
+    readonly collectedCount: string;
+    readonly commentCount: string;
+    readonly shareCount: string;
+  };
+  readonly tags: string;
+  readonly time: number;
+  readonly lastUpdateTime: number;
+  readonly url: string;
+}
+
+/**
  * Comment operation result
  */
 export interface CommentResult {

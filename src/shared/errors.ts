@@ -136,3 +136,9 @@ export class DeleteError extends XHSError {
     super(message, 'DeleteError', context, originalError);
   }
 }
+
+export class DownloadError extends XHSError {
+  constructor(message: string, context?: XHSErrorContext, originalError?: Error) {
+    super(message, 'DownloadError', context, originalError);
+  }
+}
