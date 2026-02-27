@@ -2,7 +2,7 @@
  * Publishing service for XHS MCP Server
  */
 
-import { Page } from 'puppeteer';
+import { Page, ElementHandle } from 'puppeteer';
 import { Config, PublishResult } from '../../shared/types';
 import { PublishError, InvalidImageError } from '../../shared/errors';
 import { BaseService } from '../../shared/base.service';
@@ -447,8 +447,8 @@ export class PublishService extends BaseService {
   }
 
   private async uploadImages(page: Page, imagePaths: string[]): Promise<void> {
-    // Try primary file input selector
-    let fileInput = await page.$('input[type=file]') as any;
+    // Try primary file input selector - the input has 'multiple' attribute for multi-file upload
+    let fileInput = await page.$('input[type=file].upload-input') as any;
 
     if (!fileInput) {
       // Fallback to alternative selector
@@ -459,14 +459,65 @@ export class PublishService extends BaseService {
       }
     }
 
-    // Upload each image
-    for (const imagePath of imagePaths) {
-      try {
-        await fileInput.uploadFile(imagePath);
-        await sleep(1500); // Wait between uploads
-      } catch (error) {
-        throw new PublishError(`Failed to upload image ${imagePath}: ${error}`);
+    console.log(`准备上传 ${imagePaths.length} 张图片:`, imagePaths);
+
+    // Upload all images at once - we need to make sure we're using the right method
+    // Depending on the Puppeteer version and element type, setInputFiles is the modern way
+    try {
+      // Check if setInputFiles method exists and use it
+      if (fileInput && typeof fileInput.setInputFiles === 'function') {
+        console.log('使用 setInputFiles 方法上传', imagePaths);
+        await fileInput.setInputFiles(imagePaths);
+      } else {
+        // Fallback: use uploadFile method (older approach)
+        // For multiple files, we need to call setInputFiles if available or handle appropriately
+        // If the element doesn't support setInputFiles, try using the standard uploadFile
+        console.log('setInputFiles 方法不可用，尝试一次性上传所有图片');
+
+        // Try to upload all files using uploadFile method - newer versions support arrays
+        try {
+          await (fileInput as any).uploadFile(...imagePaths);
+        } catch (uploadError) {
+          console.log('批量上传失败，尝试逐个上传但确保图片处理完整');
+          // Upload each image file, but ensure all are processed properly
+          for (const imagePath of imagePaths) {
+            await fileInput.uploadFile(imagePath);
+            // Add a short delay between uploads to allow for UI updates
+            await sleep(1000);
+          }
+        }
       }
+
+      // Wait for images to be processed - wait longer to ensure all images appear in UI
+      console.log('等待图片完全处理完成...');
+      await sleep(15000); // Increased wait time to ensure all images are fully processed
+
+      // Verify that all images were uploaded by waiting for the expected number of image elements
+      await page.waitForFunction(
+        (expectedCount) => {
+          // Look for various elements that represent uploaded images
+          const imageElements = document.querySelectorAll('img[src^="blob:"], .image-item, .uploaded-image, .preview-image, .cover-item, .image-container');
+          console.log('已找到图像元素数量:', imageElements.length, '预期数量:', expectedCount);
+          return imageElements.length >= expectedCount;
+        },
+        { timeout: 60000 }, // Increased timeout to allow for proper image processing
+        imagePaths.length
+      );
+
+      // Additional verification - check that the uploaded images are displayed
+      for (let i = 0; i < imagePaths.length; i++) {
+        try {
+          await page.waitForSelector('img[src^="blob:"], .image-item, .uploaded-image, .preview-image, .cover-item', { timeout: 10000 });
+        } catch (waitError) {
+          console.warn(`Warning: Could not confirm all image uploads after waiting`);
+        }
+      }
+
+      // Final verification - wait a bit more to ensure everything is settled
+      console.log('最终等待图片处理完成...');
+      await sleep(5000);
+    } catch (error) {
+      throw new PublishError(`Failed to upload images: ${error}`);
     }
   }
 
@@ -543,12 +594,39 @@ export class PublishService extends BaseService {
         }
       }
 
+      // Strategy 1.5: Try div with aria-label containing content description
+      const ariaLabelContent = await page.$('div[aria-label*="正文"], div[aria-label*="内容"], div[aria-label*="description"]');
+      if (ariaLabelContent) {
+        const isVisible = await ariaLabelContent.isIntersectingViewport();
+        if (isVisible) {
+          return ariaLabelContent;
+        }
+      }
+
+      // Strategy 1.75: Try with data attributes that indicate content input
+      const dataAttributeContent = await page.$('div[data-placeholder*="正文"], div[data-placeholder*="内容"], div[data-placeholder*="description"]');
+      if (dataAttributeContent) {
+        const isVisible = await dataAttributeContent.isIntersectingViewport();
+        if (isVisible) {
+          return dataAttributeContent;
+        }
+      }
+
       // Strategy 2: Try div.tiptap.ProseMirror (primary selector for creator platform)
       const tiptapEditor = await page.$('div.tiptap.ProseMirror');
       if (tiptapEditor) {
         const isVisible = await tiptapEditor.isIntersectingViewport();
         if (isVisible) {
           return tiptapEditor;
+        }
+      }
+
+      // Strategy 2.5: Try new editor classes that might be used
+      const newEditorClass = await page.$('.editor-container, .note-editor, .xhs-editor, .creator-editor, .text-editor, .content-input');
+      if (newEditorClass) {
+        const isVisible = await newEditorClass.isIntersectingViewport();
+        if (isVisible) {
+          return newEditorClass;
         }
       }
 
@@ -571,12 +649,25 @@ export class PublishService extends BaseService {
       const contentSelectors = [
         '.tiptap.ProseMirror',
         'textarea[placeholder*="正文"]',
+        'textarea[placeholder*="内容"]',
+        'textarea[placeholder*="desc"]',
         'textarea[multiline]',
         'div[data-placeholder*="正文"]',
+        'div[data-placeholder*="内容"]',
+        'div[data-placeholder*="description"]',
         '.content-editor',
         'div[role="textbox"]',
         'textbox[role="textbox"]',
         'textbox[multiline]',
+        'div[placeholder*="输入"]',
+        'div[aria-placeholder*="正文"]',
+        'div[aria-placeholder*="内容"]',
+        'div[aria-placeholder*="description"]',
+        '.ProseMirror',
+        '.editor-input',
+        '[class*="content"]',
+        '[class*="editor"]',
+        '[class*="text"]'
       ];
 
       for (const selector of contentSelectors) {
@@ -592,6 +683,29 @@ export class PublishService extends BaseService {
         const isVisible = await element.isIntersectingViewport();
         if (isVisible) {
           return element;
+        }
+      }
+
+      // Strategy 7: Check for specific XiaoHongShu content areas
+      const xhsSpecificSelectors = [
+        '.note-textarea',
+        '.input-container',
+        '.editor-wrapper',
+        '.content-input-area',
+        '[data-v-*][class*="editor"]', // Vue-specific selectors
+        '[class*="RichText"]',
+        '[class*="rich-text"]',
+        '[class*="description"]',
+        '[class*="textarea"]'
+      ];
+
+      for (const selector of xhsSpecificSelectors) {
+        const element = await page.$(selector);
+        if (element) {
+          const isVisible = await element.isIntersectingViewport();
+          if (isVisible) {
+            return element;
+          }
         }
       }
 
@@ -632,7 +746,7 @@ export class PublishService extends BaseService {
     // Wait for content area to appear
     try {
       await page.waitForSelector(
-        'div[role="textbox"][contenteditable="true"], .tiptap.ProseMirror, div[contenteditable="true"], textarea, [role="textbox"], .ql-editor, textbox[multiline]',
+        'div[role="textbox"][contenteditable="true"], .tiptap.ProseMirror, div[contenteditable="true"], textarea, [role="textbox"], .ql-editor, textbox[multiline], div[aria-label*="正文"], .editor-container, .note-editor, .xhs-editor, .creator-editor, div[placeholder*="输入"], div[aria-placeholder*="正文"], .ProseMirror, .editor-input, [class*="content"], [class*="editor"], [class*="text"]',
         { timeout: 10000 }
       );
     } catch (error) {
@@ -653,7 +767,7 @@ export class PublishService extends BaseService {
       // Try to find any contenteditable or textarea element
       try {
         const allContentElements = await page.$$(
-          'div[role="textbox"][contenteditable="true"], .tiptap.ProseMirror, div[contenteditable="true"], textarea, [role="textbox"], .ql-editor, p[contenteditable="true"], textbox[multiline]'
+          'div[role="textbox"][contenteditable="true"], .tiptap.ProseMirror, div[contenteditable="true"], textarea, [role="textbox"], .ql-editor, p[contenteditable="true"], textbox[multiline], div[aria-label*="正文"], .editor-container, .note-editor, .xhs-editor, .creator-editor, div[placeholder*="输入"], div[aria-placeholder*="正文"], .ProseMirror, .editor-input, [class*="content"], [class*="editor"], [class*="text"]'
         );
 
         for (let i = 0; i < allContentElements.length; i++) {
@@ -737,11 +851,59 @@ export class PublishService extends BaseService {
     }
 
     try {
+      // Check if the element is an element node and clickable
+      const elementIsClickable = await page.evaluate(element => {
+        // Check if element exists and is an element node
+        if (!element || !(element instanceof Element)) {
+          return false;
+        }
+
+        // Check if element is visible and not disabled
+        const computedStyle = window.getComputedStyle(element);
+        const isVisible = computedStyle.display !== 'none' &&
+                         computedStyle.visibility !== 'hidden' &&
+                         computedStyle.opacity !== '0';
+        const isEnabled = computedStyle.pointerEvents !== 'none';
+
+        return isVisible && isEnabled;
+      }, contentElement);
+
+      if (!elementIsClickable) {
+        throw new PublishError('Content element is not clickable or visible');
+      }
+
+      // Click the element first to focus it
       await contentElement.click();
       await sleep(500); // Wait for focus
-      await (contentElement as any).type(content);
+
+      // Try to type into the element
+      await contentElement.type(content);
     } catch (error) {
-      throw new PublishError(`Failed to fill content: ${error}`);
+      logger.warn(`Standard typing failed: ${error}. Trying alternative method...`);
+
+      try {
+        // Alternative: Use page.evaluate to set the content directly
+        await page.evaluate((element, content) => {
+          if (element) {
+            // Clear existing content
+            element.textContent = '';
+
+            // Set the new content
+            if (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement) {
+              element.value = content;
+            } else {
+              element.textContent = content;
+
+              // Trigger input event to notify any listeners
+              const event = new Event('input', { bubbles: true });
+              element.dispatchEvent(event);
+            }
+          }
+        }, contentElement, content);
+      } catch (evalError) {
+        logger.error(`Alternative content filling method failed: ${evalError}`);
+        throw new PublishError(`Failed to fill content: ${evalError}`);
+      }
     }
   }
 
@@ -796,74 +958,125 @@ export class PublishService extends BaseService {
   }
 
   private async submitPost(page: Page): Promise<void> {
-    // Try multiple selectors for the submit/publish button
-    const submitSelectors = [
-      'button.d-button.bg-red',
-      'button.custom-button.bg-red',
-      'div.submit div.d-button-content',
-      'div.submit button',
-      '.d-button-content',
-      'button.publish-btn',
-      '[class*="publish"] button',
-      '[class*="submit"] button',
-      'div[data-testid="publish-button"]',
-      '.ant-btn-primary',
-    ];
+    logger.debug('Attempting to find and click the publish button...');
 
-    let submitButton: any = null;
-    let usedSelector = '';
+    // Wait for the page to be fully loaded and the publish button to be available
+    await sleep(2000);
 
-    // First, try to find button by exact text match using evaluateHandle
-    const publishButtonByText = await page.evaluateHandle(() => {
-      const buttons = Array.from(document.querySelectorAll('button'));
-      for (const btn of buttons) {
-        const text = btn.textContent?.trim() || '';
-        if (text === '发布' || text.includes('发布')) {
-          return btn;
-        }
-      }
-      return null;
-    });
+    // Wait specifically for the publish button container to appear
+    try {
+      await page.waitForSelector('.publish-page-publish-btn', { timeout: 20000 });
+      logger.debug('Publish button container appeared');
+    } catch (error) {
+      logger.warn('Publish button container not found after waiting');
+    }
 
-    if (publishButtonByText) {
-      submitButton = publishButtonByText;
-      usedSelector = 'button.d-button.bg-red';
-    } else {
-      // Fallback to other selectors
-      for (const selector of submitSelectors) {
-        try {
-          const button = await page.$(selector);
-          if (button) {
-            // Check if button is visible
-            const isVisible = await page.evaluate((el: Element) => {
-              const style = window.getComputedStyle(el as HTMLElement);
-              return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
-            }, button);
+    // Wait for video upload to complete before attempting to click the publish button
+    // The button might be grayed out during upload
+    logger.debug('Waiting for video upload to complete...');
+    await this.waitForVideoUploadCompletion(page);
 
-            if (isVisible) {
-              submitButton = button;
-              usedSelector = selector;
-              break;
-            }
+    // Find the button based on the HTML structure provided by the user
+    // There are two buttons in the container: "暂存离开" and "发布"
+    // We want the "发布" button, which is the one that is NOT "暂存离开"
+    let publishButton = null;
+
+    // Look specifically in the publish container for the "发布" button that has bg-red class
+    try {
+      const publishContainer = await page.$('.publish-page-publish-btn');
+      if (publishContainer) {
+        const allButtons = await page.$$('.publish-page-publish-btn button');
+        logger.debug(`Found ${allButtons.length} buttons in publish container`);
+
+        for (const button of allButtons) {
+          const text = await page.evaluate(el => el.textContent?.trim() || '', button);
+          const classes = await page.evaluate(el => el.className || '', button);
+
+          logger.debug(`Button: "${text}", Classes: "${classes}"`);
+
+          // Find the button that has "发布" text AND bg-red class (the actual publish button)
+          if (text.includes('发布') && classes.includes('bg-red')) {
+            publishButton = button;
+            logger.debug(`Found the "发布" button with bg-red class: "${text}"`);
+            break;
           }
-        } catch (error) {
-          logger.debug(`Selector ${selector} failed: ${error}`);
         }
+      }
+    } catch (error) {
+      logger.warn(`Error looking in publish container: ${error}`);
+    }
+
+    // If still not found, try to find any button with "发布" text that doesn't contain unwanted text
+    if (!publishButton) {
+      try {
+        const allButtons = await page.$$('button');
+        for (const button of allButtons) {
+          const text = await page.evaluate(el => el.textContent?.trim() || '', button);
+
+          // Look for the button with "发布" text but exclude buttons with unwanted text
+          if (text.includes('发布') &&
+              !text.includes('暂存') &&
+              !text.includes('草稿') &&
+              !text.includes('保存') &&
+              !text.includes('离开')) {
+            publishButton = button;
+            logger.debug(`Found "发布" button globally: "${text}"`);
+            break;
+          }
+        }
+      } catch (error) {
+        logger.warn(`Error looking for button globally: ${error}`);
       }
     }
 
-    if (!submitButton) {
-      throw new PublishError('Could not find submit button');
-    }
+    if (!publishButton) {
+      // Log available buttons for debugging
+      const containerButtonsInfo = await page.evaluate(() => {
+        const container = document.querySelector('.publish-page-publish-btn');
+        if (container) {
+          const buttons = container.querySelectorAll('button');
+          return Array.from(buttons).map(btn => ({
+            text: btn.textContent?.trim() || '',
+            className: btn.className || '',
+            id: btn.id || ''
+          }));
+        }
+        return [];
+      });
 
-    // Wait for submit button to be visible
-    await page.waitForSelector(usedSelector, { visible: true, timeout: 10000 });
+      const allButtonsInfo = await page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        return buttons.map(btn => ({
+          text: btn.textContent?.trim() || '',
+          className: btn.className || '',
+          id: btn.id || ''
+        })).slice(0, 10); // Just get first 10 for debugging
+      });
+
+      logger.error(`Could not find the "发布" button. Container buttons: ${JSON.stringify(containerButtonsInfo, null, 2)}`);
+      logger.error(`All page buttons (first 10): ${JSON.stringify(allButtonsInfo, null, 2)}`);
+      throw new PublishError('Could not find the "发布" button');
+    }
 
     try {
-      await submitButton.click();
-      await sleep(2000);
+      const buttonText = await page.evaluate(el => el.textContent?.trim() || '', publishButton);
+      logger.debug(`About to click publish button: "${buttonText}"`);
+
+      // Scroll into view first
+      await page.evaluate(el => {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, publishButton);
+
+      await sleep(500);
+
+      // Click the button
+      await publishButton.click();
+
+      logger.debug(`Successfully clicked publish button: "${buttonText}"`);
+      await sleep(5000); // Wait for processing
     } catch (error) {
-      throw new PublishError(`Failed to click submit button: ${error}`);
+      logger.error(`Failed to click publish button: ${error}`);
+      throw new PublishError(`Failed to click publish button: ${error}`);
     }
   }
 
@@ -957,6 +1170,89 @@ export class PublishService extends BaseService {
     }
 
     throw new PublishError('Publish completion timeout - could not determine result');
+  }
+
+  private async waitForVideoUploadCompletion(page: Page): Promise<void> {
+    logger.debug('Checking for video upload completion...');
+
+    const startTime = Date.now();
+    const timeout = 300000; // 5 minutes timeout
+
+    // Wait for signs that video upload is processing/completed
+    while (Date.now() - startTime < timeout) {
+      try {
+        // Check if there are any processing indicators
+        let processingElements: ElementHandle[] = [];
+
+        const processingSelectors = ['.uploading', '.upload-progress', '[class*="progress"]', '[class*="loading"]'];
+        for (const selector of processingSelectors) {
+          const elements = await page.$$(selector);
+          processingElements = processingElements.concat(elements);
+        }
+
+        if (processingElements.length === 0) {
+          // No processing indicators found, might be complete
+          logger.debug('No upload processing indicators found, checking for completion');
+
+          // Check for publish button to see if it's enabled (not grayed out)
+          const publishButtons = await page.$$('.publish-page-publish-btn button');
+
+          if (publishButtons.length > 0) {
+            for (const button of publishButtons) {
+              const text = await page.evaluate(el => el.textContent?.trim() || '', button);
+              const classes = await page.evaluate(el => el.className || '', button);
+
+              // Check if it's the publish button and it's not disabled
+              if (text.includes('发布')) {
+                // Check if the button is not disabled or grayed out
+                const isDisabled = await page.evaluate(el => el.disabled || el.hasAttribute('disabled'), button);
+
+                // Check if button has "gray" or "disabled" class indicating it's not clickable yet
+                if (!isDisabled && !classes.includes('disabled') && !classes.toLowerCase().includes('gray')) {
+                  logger.debug(`Publish button "${text}" is available and enabled`);
+                  return; // Upload is complete and button is clickable
+                }
+              }
+            }
+          }
+        } else {
+          logger.debug(`Still processing (${processingElements.length} indicators found), waiting...`);
+        }
+
+        // Check for success indicators that video upload completed
+        const successIndicators = [
+          '.upload-complete',
+          '.video-ready',
+          '[class*="complete"]',
+          '[class*="ready"]',
+          '[class*="success"]'
+        ];
+
+        for (const selector of successIndicators) {
+          const element = await page.$(selector);
+          if (element) {
+            const isVisible = await page.evaluate(el => {
+              const style = window.getComputedStyle(el);
+              return style && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+            }, element);
+
+            if (isVisible) {
+              logger.debug(`Found upload completion indicator: ${selector}`);
+              return;
+            }
+          }
+        }
+
+        // Wait before checking again
+        await sleep(2000);
+      } catch (error) {
+        logger.warn(`Error during video upload check: ${error}`);
+        await sleep(1000);
+        continue;
+      }
+    }
+
+    logger.warn('Video upload completion check timed out, proceeding anyway...');
   }
 
   private async extractNoteIdFromPage(page: Page): Promise<string | null> {
@@ -1257,6 +1553,9 @@ export class PublishService extends BaseService {
     // Wait for page to load
     await sleep(VIDEO_TIMEOUTS.PAGE_LOAD);
 
+    // Wait for the video upload UI to appear
+    await page.waitForSelector('.publish-page-publish-btn, .upload-video-container, #upload-container, [class*="upload"]', { timeout: 15000 });
+
     // Switch to video upload tab if needed
     await this.clickVideoUploadTab(page);
 
@@ -1268,6 +1567,14 @@ export class PublishService extends BaseService {
 
     // Wait for video to be processed (videos take longer than images)
     await sleep(VIDEO_TIMEOUTS.VIDEO_PROCESSING);
+
+    // Wait specifically for the publish button to appear
+    try {
+      await page.waitForSelector('.publish-page-publish-btn', { timeout: 15000 });
+      logger.debug('Publish button container appeared');
+    } catch (error) {
+      logger.warn('Publish button container not found, continuing anyway');
+    }
 
     // Fill in title
     await this.fillTitle(page, title);
@@ -1283,7 +1590,10 @@ export class PublishService extends BaseService {
       await this.addTags(page, tags);
     }
 
-    // Submit the video
+    // Wait a moment for UI to settle before clicking publish
+    await sleep(2000);
+
+    // Submit the video - this is where we ensure we're clicking the right button
     await this.submitPost(page);
 
     // Wait for completion and check result (videos need longer timeout)
